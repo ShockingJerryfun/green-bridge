@@ -1,0 +1,4 @@
+interface:
+  display_name: "Green Bridge"
+  short_description: "通过 Git 派单、回传原始结果并判读的蓝绿跨区协作流程"
+  default_prompt: "使用 $green-bridge 完成当前蓝区协作任务，按本轮授权范围推进到可核对的交接结果。"

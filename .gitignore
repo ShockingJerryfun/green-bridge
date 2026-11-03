@@ -1,0 +1,11 @@
+__pycache__/
+*.py[cod]
+.green-state/
+local.config.json
+/local/
+.env
+.env.*
+*.sqlite
+*.sqlite3
+*.db
+*.log

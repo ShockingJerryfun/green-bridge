@@ -1,0 +1,10 @@
+{
+  "git_dir": "/absolute/path/to/blue-control.git",
+  "state_dir": "/absolute/path/to/blue-state",
+  "remote": "origin",
+  "requests_branch": "pingpong/requests",
+  "results_branch": "pingpong/results",
+  "api_submit": false,
+  "author_name": "Pingpong Blue",
+  "author_email": "pingpong-blue@localhost"
+}

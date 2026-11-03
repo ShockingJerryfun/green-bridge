@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "description": "本机服务器资料，不随项目分享；连接和身份以当前核验为准。",
+  "preferred_python": null,
+  "green_service": {},
+  "server_rules": [],
+  "servers": [],
+  "historical_hosts": []
+}

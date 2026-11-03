@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "id": "hello-01",
+  "action": "command.execute",
+  "command": {
+    "mode": "powershell",
+    "cwd": "C:\\Pingpong\\work",
+    "script": "Write-Output 'PINGPONG_OK'; exit 0",
+    "report_running": false
+  },
+  "timeout_seconds": 30
+}
