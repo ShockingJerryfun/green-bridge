@@ -1578,6 +1578,7 @@ def ingest_requests(connection: sqlite3.Connection, git: GitTransport, settings:
         commits = git.run(["rev-list", "--reverse", "--first-parent", oldest + ".." + head]).splitlines()
         order = {commit.decode("ascii"): index for index, commit in enumerate(commits)}
         changes.sort(key=lambda change: order[change[0]])
+    received = []
     with connection:
         for commit, command_id, data, group_id in changes:
             task_id = group_job_id(group_id, command_id) if group_id is not None else command_id
@@ -1612,8 +1613,19 @@ def ingest_requests(connection: sqlite3.Connection, git: GitTransport, settings:
             if group_id is not None:
                 connection.execute("INSERT INTO task_groups(job_id, group_id, command_id) VALUES (?, ?, ?)",
                                    (task_id, group_id, command_id))
+            received.append(task_id)
         set_metadata(connection, "request_head", head)
         set_metadata(connection, "group_request_head", head)
+    for task_id in received:
+        job = connection.execute("SELECT * FROM jobs WHERE id = ?", (task_id,)).fetchone()
+        log_task_received(connection, job)
+
+
+def mark_published(connection: sqlite3.Connection, job: sqlite3.Row) -> bool:
+    updated = connection.execute("UPDATE jobs SET published_state = ? WHERE id = ? AND state = ? "
+                                 "AND published_state != ?",
+                                 (job["state"], job["id"], job["state"], job["state"]))
+    return updated.rowcount > 0
 
 
 def publish_job(connection: sqlite3.Connection, git: GitTransport, settings: Settings,
@@ -1636,8 +1648,9 @@ def publish_job(connection: sqlite3.Connection, git: GitTransport, settings: Set
                              confirm_remote=settings.result_confirmation == "fetch")
     record_results_head(connection, git, commit)
     with connection:
-        connection.execute("UPDATE jobs SET published_state = ? WHERE id = ? AND state = ?",
-                           (job["state"], job["id"], job["state"]))
+        published = mark_published(connection, job)
+    if published and job["state"] in TERMINAL_STATES:
+        log_task_completed(connection, job)
 
 
 def prepare_adapter_input(connection: sqlite3.Connection, job: sqlite3.Row) -> Dict[str, Any]:
@@ -1800,18 +1813,73 @@ def command_output_info(snapshot: Path, task_id: str, stream: str,
     return {"size": size, "sha256": digest.hexdigest(), "parts": parts}
 
 
-def log_execution(connection: sqlite3.Connection, job: sqlite3.Row, request: Dict[str, Any]) -> None:
+def task_description(request: Dict[str, Any]) -> str:
     description = request.get("description")
     if isinstance(description, str):
         description = " ".join("".join(char if char.isprintable() else " " for char in description).split())[:200]
     if not isinstance(description, str) or not description:
-        description = "未填写中文说明"
+        return "未填写中文说明"
+    return description
+
+
+def task_identity(connection: sqlite3.Connection, job: sqlite3.Row) -> str:
+    group = connection.execute("SELECT group_id, command_id FROM task_groups WHERE job_id = ?", (job["id"],)).fetchone()
+    return ("任务 %s / 指令 %s" % (group["group_id"], group["command_id"]) if group is not None
+            else "任务 %s" % job["id"])
+
+
+def log_task_received(connection: sqlite3.Connection, job: sqlite3.Row) -> None:
+    request = json.loads(job["request_json"])
     labels = {"command.execute": "命令", "task.execute": "代理任务", "session.new": "新建会话",
               "session.attach": "关联会话", "session.switch": "切换会话", "session.checkpoint": "记录会话"}
-    group = connection.execute("SELECT group_id, command_id FROM task_groups WHERE job_id = ?", (job["id"],)).fetchone()
-    identity = ("任务 %s / 指令 %s" % (group["group_id"], group["command_id"]) if group is not None
-                else "任务 %s" % job["id"])
-    LOGGER.log(TASK_LOG_LEVEL, "执行%s：%s [%s]", labels.get(request["action"], "操作"), description, identity)
+    LOGGER.log(TASK_LOG_LEVEL, "收到%s：%s [%s]", labels.get(request["action"], "操作"),
+               task_description(request), task_identity(connection, job))
+
+
+def elapsed_since(start: object, end: datetime) -> Optional[float]:
+    if not isinstance(start, str):
+        return None
+    try:
+        beginning = datetime.fromisoformat(start.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if beginning.tzinfo is None:
+        return None
+    elapsed = (end - beginning).total_seconds()
+    return elapsed if elapsed >= 0 else None
+
+
+def log_task_completed(connection: sqlite3.Connection, job: sqlite3.Row) -> None:
+    result = json.loads(job["result_json"])
+    request = json.loads(job["request_json"])
+    timing = result.get("timing", {})
+    now = datetime.now(timezone.utc)
+    total = elapsed_since(timing.get("queued_at"), now)
+    delivery = elapsed_since(timing.get("finished_at"), now)
+    command = result.get("command_result") or {}
+    execution = command.get("process_duration_seconds")
+    if not isinstance(execution, (int, float)) or execution < 0:
+        execution = None
+        finished = timing.get("finished_at")
+        if isinstance(finished, str):
+            try:
+                end = datetime.fromisoformat(finished.replace("Z", "+00:00"))
+            except ValueError:
+                end = None
+            if end is not None and end.tzinfo is not None:
+                execution = elapsed_since(timing.get("running_at"), end)
+
+    def display(value: Optional[float]) -> str:
+        return "未知" if value is None else "%.2f 秒" % value
+
+    labels = {"completed": "已完成", "failed": "失败", "unknown": "结果未知", "needs_input": "需处理"}
+    status = labels.get(job["state"], "结果已回传")
+    exit_code = command.get("exit_code")
+    if job["state"] == "failed" and isinstance(exit_code, int):
+        status += "（退出码 %d）" % exit_code
+    LOGGER.log(TASK_LOG_LEVEL, "%s：%s；执行 %s，回传及确认 %s，绿区总计 %s [%s]", status,
+               task_description(request), display(execution), display(delivery), display(total),
+               task_identity(connection, job))
 
 
 def execute_command_job(connection: sqlite3.Connection, git: GitTransport, settings: Settings,
@@ -1870,7 +1938,6 @@ def execute_command_job(connection: sqlite3.Connection, git: GitTransport, setti
     try:
         with (directory / "stdout.live").open("xb") as stdout, (directory / "stderr.live").open("xb") as stderr:
             try:
-                log_execution(connection, job, request)
                 process = subprocess.run(argv, cwd=str(cwd), stdin=subprocess.DEVNULL, stdout=stdout, stderr=stderr,
                                          env=environment, timeout=timeout, check=False)
                 exit_code = process.returncode
@@ -1934,7 +2001,6 @@ def execute_job(connection: sqlite3.Connection, git: GitTransport, settings: Set
     update_job(connection, job["id"], "running", running, "running")
     job = connection.execute("SELECT * FROM jobs WHERE id = ?", (job["id"],)).fetchone()
     try:
-        log_execution(connection, job, request)
         response = adapter_response(settings, adapter_input, timeout)
         complete_job(connection, job, adapter_input, response)
     except BridgeError as exc:
@@ -2046,8 +2112,9 @@ def recover_command_publication(connection: sqlite3.Connection, git: ConcurrentG
         commit = git.publish_command_result(job, result, head, False, group_id)
         record_results_head(connection, git, commit)
         with connection:
-            connection.execute("UPDATE jobs SET published_state = ? WHERE id = ? AND state = ?",
-                               (job["state"], job["id"], job["state"]))
+            published = mark_published(connection, job)
+        if published:
+            log_task_completed(connection, job)
         return True
     if existing is None or existing.get("state") != "delivery_pending":
         pending = make_result(job, "delivery_pending", "Command finished; output delivery is being retried.")
@@ -2152,10 +2219,13 @@ def batch_publication_worker(settings: Settings, task_ids: Sequence[str], group_
                     group_id, entries, metadata(connection, "results_head"),
                     confirm_remote=settings.result_confirmation == "fetch")
                 record_results_head(connection, git, commit)
+                published = []
                 with connection:
                     for row, _ in entries:
-                        connection.execute("UPDATE jobs SET published_state = ? WHERE id = ? AND state = ?",
-                                           (row["state"], row["id"], row["state"]))
+                        if mark_published(connection, row):
+                            published.append(row)
+                for row in published:
+                    log_task_completed(connection, row)
             for row, _ in entries:
                 record_delivery_attempt(connection, row["id"], None, row["state"])
             return True
@@ -2215,10 +2285,13 @@ def api_batch_publication_worker(settings: Settings, task_ids: Sequence[str], gr
             record_results_head(connection, git, confirmed)
             if generation is not None:
                 verify_atomic_generation(connection, generation)
+            published = []
             with connection:
                 for row, _ in entries:
-                    connection.execute("UPDATE jobs SET published_state = ? WHERE id = ? AND state = ?",
-                                       (row["state"], row["id"], row["state"]))
+                    if mark_published(connection, row):
+                        published.append(row)
+            for row in published:
+                log_task_completed(connection, row)
             for row, _ in entries:
                 record_delivery_attempt(connection, row["id"], None, row["state"])
             return True
@@ -2723,7 +2796,7 @@ def service_loop(connection: sqlite3.Connection, git: GitTransport, settings: Se
 def serve(settings: Settings, once: bool) -> None:
     settings.state_dir.mkdir(parents=True, exist_ok=True)
     file_log = RotatingFileHandler(str(settings.state_dir / "service.log"), maxBytes=5242880,
-                                   backupCount=3, encoding="utf-8")
+                                   backupCount=3, encoding="utf-8-sig")
     file_log.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
     previous_log_level = LOGGER.level
     warning_filter = RepeatedWarningFilter()
@@ -2932,6 +3005,15 @@ def main() -> int:
     output.add_argument("--results-commit", help="Already-fetched result commit from status; avoids a new fetch")
     output.add_argument("--task", help="Read the command from a task result file")
     args = parser.parse_args()
+    if args.command == "serve" and sys.platform == "win32" and hasattr(sys.stderr, "reconfigure"):
+        encoding = "utf-8"
+        if not sys.stderr.isatty():
+            try:
+                if sys.stderr.buffer.tell() == 0:
+                    encoding = "utf-8-sig"
+            except (AttributeError, OSError):
+                pass  # A pipe cannot report an offset; use UTF-8 without a signature.
+        sys.stderr.reconfigure(encoding=encoding, errors="backslashreplace")
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     try:
         settings = load_settings(Path(args.config))

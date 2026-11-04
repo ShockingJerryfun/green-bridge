@@ -111,6 +111,26 @@ class GreenBridgeTests(unittest.TestCase):
     def calls_list(self) -> list:
         return self.calls.read_text(encoding="utf-8").splitlines() if self.calls.exists() else []
 
+    def test_windows_service_stderr_uses_readable_utf8(self) -> None:
+        program = ("import sys; from scripts import green_bridge as b; "
+                   "b.sys.platform='win32'; b.load_settings=lambda path: None; "
+                   "b.serve=lambda settings, once: b.LOGGER.log(b.TASK_LOG_LEVEL, '中文任务'); "
+                   "raise SystemExit(b.main())")
+        environment = os.environ.copy()
+        environment["PYTHONIOENCODING"] = "gbk"
+        for existing in (b"", b"previous\n"):
+            path = self.root / ("console-" + str(len(existing)))
+            path.write_bytes(existing)
+            with path.open("ab") as output:
+                process = subprocess.run([sys.executable, "-c", program, "--config", "unused", "serve", "--once"],
+                                         stdout=subprocess.DEVNULL, stderr=output, env=environment, check=False)
+            self.assertEqual(process.returncode, 0)
+            data = path.read_bytes()
+            self.assertIn("中文任务", data.decode("utf-8-sig"))
+            self.assertEqual(data.startswith(b"\xef\xbb\xbf"), not existing)
+            if existing:
+                self.assertNotIn(b"\xef\xbb\xbf", data)
+
     def test_new_switch_execute_and_duplicate_submission(self) -> None:
         first = self.submit("job-1", "session.new", "project")
         self.call("serve", "--once")

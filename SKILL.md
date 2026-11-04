@@ -4,7 +4,7 @@ description: 蓝绿跨区 Git 协作：派单、收取交付，以及使用绿�
 license: Apache-2.0
 metadata:
   author: ai-innovation-engineering
-  version: "1.4.0"
+  version: "1.5.0"
 ---
 
 # Green Bridge

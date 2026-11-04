@@ -170,6 +170,8 @@ class GreenConcurrencyTests(unittest.TestCase):
              "description": "检查运行状态\n读取进程信息", "command": self.command("print('FIRST')")},
             {"version": 1, "id": "legacy", "action": "command.execute",
              "command": self.command("print('SECOND')")},
+            {"version": 1, "id": "failed", "action": "command.execute",
+             "description": "检查失败状态", "command": self.command("raise SystemExit(7)")},
         ]
         path = self.root / "log-batch.json"
         path.write_text(json.dumps({"commands": requests}, ensure_ascii=False), encoding="utf-8")
@@ -178,10 +180,15 @@ class GreenConcurrencyTests(unittest.TestCase):
         self.call("submit-batch", str(path), "--task", task, "--fast")
         self.assertEqual(self.wait_group_result(task, "described")["state"], "completed")
         self.assertEqual(self.wait_group_result(task, "legacy")["state"], "completed")
-        time.sleep(2.5)  # Allow multiple idle synchronizations after both commands finish.
+        self.assertEqual(self.wait_group_result(task, "failed")["state"], "failed")
+        time.sleep(2.5)  # Allow multiple idle synchronizations after the commands finish.
         log = (self.state / "service.log").read_text(encoding="utf-8")
-        self.assertIn("执行命令：检查运行状态 读取进程信息 [任务 log-test / 指令 described]", log)
-        self.assertIn("执行命令：未填写中文说明 [任务 log-test / 指令 legacy]", log)
+        received = "收到命令：检查运行状态 读取进程信息 [任务 log-test / 指令 described]"
+        self.assertIn(received, log)
+        self.assertIn("收到命令：未填写中文说明 [任务 log-test / 指令 legacy]", log)
+        self.assertRegex(log, r"已完成：检查运行状态 读取进程信息；执行 \d+\.\d+ 秒，回传及确认 \d+\.\d+ 秒，绿区总计 \d+\.\d+ 秒")
+        self.assertIn("失败（退出码 7）：检查失败状态", log)
+        self.assertLess(log.index(received), log.index("已完成：检查运行状态"))
         self.assertNotIn("Git branch synchronization took", log)
         self.assertNotIn("FIRST", log)
         self.assertNotIn("SECOND", log)
@@ -657,7 +664,7 @@ for line in sys.stdin:
         source = ("import sys; from pathlib import Path; p=Path(sys.argv[1]); "
                   "p.write_bytes((p.read_bytes() if p.exists() else b'')+b'X'); print('OK')")
         request = {"version": 1, "id": "lost-ack-job", "action": "command.execute",
-                   "command": self.command(source, str(calls))}
+                   "description": "确认回传结果", "command": self.command(source, str(calls))}
         path = self.root / "lost-ack-job.json"
         path.write_text(json.dumps(request), encoding="utf-8")
         self.start_service_with_local_atomic_api({"PINGPONG_TEST_LOST_ACK": str(marker)})
@@ -676,6 +683,13 @@ for line in sys.stdin:
                 break
             time.sleep(.05)
         self.assertEqual(published, "completed", "the result was not confirmed after the simulated loss")
+        log = self.state / "service.log"
+        deadline = time.monotonic() + 5
+        while "已完成：确认回传结果" not in log.read_text(encoding="utf-8") and time.monotonic() < deadline:
+            time.sleep(.05)
+        logged = log.read_text(encoding="utf-8")
+        self.assertEqual(logged.count("收到命令：确认回传结果"), 1)
+        self.assertEqual(logged.count("已完成：确认回传结果"), 1)
         self.assertFalse(marker.exists(), "the test did not simulate an acknowledgement loss")
         self.assertEqual(calls.read_bytes(), b"X", "the command was executed more than once")
         history = git("--git-dir", str(self.remote), "rev-list", "refs/heads/pingpong/results", "--",
