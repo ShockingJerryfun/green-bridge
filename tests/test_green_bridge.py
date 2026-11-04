@@ -639,19 +639,17 @@ class GreenBridgeTests(unittest.TestCase):
         self.assertEqual(self.calls_list(), ["new"])
 
     def test_state_directory_allows_only_one_service(self) -> None:
-        service_log = self.state / "service.log"
-        old_count = service_log.read_text(encoding="utf-8").count("Service lock acquired")
+        self.submit("lock-probe", "session.new", "project")
         process = subprocess.Popen([sys.executable, str(BRIDGE), "--config", str(self.config), "serve"],
                                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         try:
             deadline = time.monotonic() + 15
             while time.monotonic() < deadline:
-                count = service_log.read_text(encoding="utf-8").count("Service lock acquired")
-                if count > old_count:
+                if "lock-probe" in self.calls_list():
                     break
-                self.assertIsNone(process.poll(), "background service exited before acquiring the lock")
+                self.assertIsNone(process.poll(), "background service exited before handling the task")
                 time.sleep(0.05)
-            self.assertGreater(count, old_count)
+            self.assertIn("lock-probe", self.calls_list())
             result = self.call("serve", "--once", check=False)
             self.assertIn("already holds", result.stderr)
         finally:

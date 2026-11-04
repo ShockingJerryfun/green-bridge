@@ -208,13 +208,14 @@ def job_ready(database: Path, job_id: str) -> Optional[bool]:
     try:
         row = connection.execute("SELECT state, published_state FROM jobs WHERE id = ?", (job_id,)).fetchone()
         active = connection.execute("SELECT count(*) FROM jobs WHERE state IN ('queued', 'accepted', 'running')").fetchone()[0]
+        pending = connection.execute("SELECT count(*) FROM jobs WHERE published_state != state").fetchone()[0]
     finally:
         connection.close()
     if row is None:
         return None
     if row[0] in {"failed", "needs_input", "unknown"}:
         return False
-    if row[0] == "completed" and row[1] == "completed" and active == 0:
+    if row[0] == "completed" and row[1] == "completed" and active == 0 and pending == 0:
         return True
     return None
 
@@ -231,7 +232,8 @@ def when_quiescent(database: Path, job_id: str, action: Callable[[], None]) -> b
             raise
         row = connection.execute("SELECT state, published_state FROM jobs WHERE id = ?", (job_id,)).fetchone()
         active = connection.execute("SELECT count(*) FROM jobs WHERE state IN ('queued', 'accepted', 'running')").fetchone()[0]
-        if row is None or row[0] != "completed" or row[1] != "completed" or active:
+        pending = connection.execute("SELECT count(*) FROM jobs WHERE published_state != state").fetchone()[0]
+        if row is None or row[0] != "completed" or row[1] != "completed" or active or pending:
             return False
         action()
         return True

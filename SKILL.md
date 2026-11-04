@@ -4,7 +4,7 @@ description: 蓝绿跨区 Git 协作：派单、收取交付，以及使用绿�
 license: Apache-2.0
 metadata:
   author: ai-innovation-engineering
-  version: "1.3.0"
+  version: "1.4.0"
 ---
 
 # Green Bridge
@@ -47,6 +47,8 @@ GitHub 仓库可选用条件请求和持久 HTTPS 连接快速检测任务分支
 Git 仓库、两侧认证和首次部署参见 [接入与认证](references/setup.md)。GitHub 的 API 快速检测是可选功能。验证两侧权限和网络后再判断时延，不关闭证书或主机密钥校验。
 
 同一工作目标的自动派单使用稳定的任务 ID，把各条指令追加到对应任务文件：用 `submit <请求.json> --task <任务ID>`，并用 `status <指令ID> --task <任务ID>` 和 `output <指令ID> --task <任务ID>` 读取结果。指令 ID 在同一任务内不可复用；重试只使用相同 ID 和相同内容。换会话、查进程或补充验证不自动新建任务；确属独立目标时才另建。旧格式派单和结果仍可用。先确认绿区已支持任务文件，再使用新格式；详情见 [自动交接协议](references/green_service.md)。
+
+自动派单时，为每条指令的 `description` 字段编写一句简短中文，说明即将做什么，让绿区服务日志可读；不要写入命令全文、凭据或不必要的敏感资料。服务不会为此额外调用模型。重试时保留原字段和值，不改写已有指令。
 
 默认通过直接命令完成任务，包括由蓝区组织的多步骤脚本；确保目标、操作和回传范围明确。无需 shell 功能的单个程序可用 `argv` 直接启动；管道和多步骤脚本可用 PowerShell。短而只读的命令可优先设 `report_running: false` 并使用 `submit --fast` 减少 Git 往返；结果出现前的 `not_found` 不能当作未执行，按任务 ID 等待，不换 ID 重发。长任务或需要远端进度的任务保留默认运行状态。开启并发后，互不依赖的命令可同时派发；有先后依赖的命令应合并成脚本或等前一步完成。
 

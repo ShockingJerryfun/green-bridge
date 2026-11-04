@@ -36,6 +36,8 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 LOGGER = logging.getLogger("green_bridge")
+TASK_LOG_LEVEL = logging.INFO + 1
+logging.addLevelName(TASK_LOG_LEVEL, "任务")
 IDENTIFIER = re.compile(r"^[a-z0-9][a-z0-9._-]{0,79}$")
 REMOTE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$")
 COMMIT_ID = re.compile(r"^[0-9a-fA-F]{7,64}$")
@@ -58,6 +60,29 @@ RESULT_PREFIX = "pingpong/results/"
 OUTPUT_PREFIX = "pingpong/outputs/"
 GROUP_REQUEST_PREFIX = "pingpong/task-requests/"
 GROUP_RESULT_PREFIX = "pingpong/task-results/"
+
+
+class RepeatedWarningFilter(logging.Filter):
+    """Keep recurring identical failures visible without logging every retry."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.last_emitted: Dict[Tuple[int, str], float] = {}
+        self.lock = threading.Lock()
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if record.levelno < logging.WARNING:
+            return True
+        message = (record.levelno, record.getMessage())
+        now = time.monotonic()
+        with self.lock:
+            previous = self.last_emitted.get(message)
+            if previous is not None and now - previous < 3600:
+                return False
+            if previous is None and len(self.last_emitted) >= 1024:
+                del self.last_emitted[next(iter(self.last_emitted))]
+            self.last_emitted[message] = now
+        return True
 
 
 class BridgeError(RuntimeError):
@@ -1775,6 +1800,20 @@ def command_output_info(snapshot: Path, task_id: str, stream: str,
     return {"size": size, "sha256": digest.hexdigest(), "parts": parts}
 
 
+def log_execution(connection: sqlite3.Connection, job: sqlite3.Row, request: Dict[str, Any]) -> None:
+    description = request.get("description")
+    if isinstance(description, str):
+        description = " ".join("".join(char if char.isprintable() else " " for char in description).split())[:200]
+    if not isinstance(description, str) or not description:
+        description = "未填写中文说明"
+    labels = {"command.execute": "命令", "task.execute": "代理任务", "session.new": "新建会话",
+              "session.attach": "关联会话", "session.switch": "切换会话", "session.checkpoint": "记录会话"}
+    group = connection.execute("SELECT group_id, command_id FROM task_groups WHERE job_id = ?", (job["id"],)).fetchone()
+    identity = ("任务 %s / 指令 %s" % (group["group_id"], group["command_id"]) if group is not None
+                else "任务 %s" % job["id"])
+    LOGGER.log(TASK_LOG_LEVEL, "执行%s：%s [%s]", labels.get(request["action"], "操作"), description, identity)
+
+
 def execute_command_job(connection: sqlite3.Connection, git: GitTransport, settings: Settings,
                         job: sqlite3.Row, asynchronous_progress: bool = False) -> None:
     request = json.loads(job["request_json"])
@@ -1831,6 +1870,7 @@ def execute_command_job(connection: sqlite3.Connection, git: GitTransport, setti
     try:
         with (directory / "stdout.live").open("xb") as stdout, (directory / "stderr.live").open("xb") as stderr:
             try:
+                log_execution(connection, job, request)
                 process = subprocess.run(argv, cwd=str(cwd), stdin=subprocess.DEVNULL, stdout=stdout, stderr=stderr,
                                          env=environment, timeout=timeout, check=False)
                 exit_code = process.returncode
@@ -1894,6 +1934,7 @@ def execute_job(connection: sqlite3.Connection, git: GitTransport, settings: Set
     update_job(connection, job["id"], "running", running, "running")
     job = connection.execute("SELECT * FROM jobs WHERE id = ?", (job["id"],)).fetchone()
     try:
+        log_execution(connection, job, request)
         response = adapter_response(settings, adapter_input, timeout)
         complete_job(connection, job, adapter_input, response)
     except BridgeError as exc:
@@ -2684,6 +2725,10 @@ def serve(settings: Settings, once: bool) -> None:
     file_log = RotatingFileHandler(str(settings.state_dir / "service.log"), maxBytes=5242880,
                                    backupCount=3, encoding="utf-8")
     file_log.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
+    previous_log_level = LOGGER.level
+    warning_filter = RepeatedWarningFilter()
+    LOGGER.setLevel(TASK_LOG_LEVEL)
+    LOGGER.addFilter(warning_filter)
     LOGGER.addHandler(file_log)
     try:
         lock = acquire_service_lock(settings.state_dir / "service-lock.sqlite3")
@@ -2706,7 +2751,9 @@ def serve(settings: Settings, once: bool) -> None:
             lock.close()
     finally:
         LOGGER.removeHandler(file_log)
+        LOGGER.removeFilter(warning_filter)
         file_log.close()
+        LOGGER.setLevel(previous_log_level)
 
 
 def submit(settings: Settings, request_path: Path, fast: bool = False,

@@ -31,6 +31,9 @@ class UpgradeGateTests(unittest.TestCase):
             self.assertIsNone(UPGRADE.job_ready(database, "upgrade"))
             with sqlite3.connect(database) as connection:
                 connection.execute("UPDATE jobs SET state='completed' WHERE id='other'")
+            self.assertIsNone(UPGRADE.job_ready(database, "upgrade"))
+            with sqlite3.connect(database) as connection:
+                connection.execute("UPDATE jobs SET published_state='completed' WHERE id='other'")
             self.assertTrue(UPGRADE.job_ready(database, "upgrade"))
             with sqlite3.connect(database) as connection:
                 connection.execute("UPDATE jobs SET state='unknown' WHERE id='upgrade'")
@@ -145,6 +148,10 @@ class UpgradeGateTests(unittest.TestCase):
             with sqlite3.connect(database) as connection:
                 connection.execute("INSERT INTO jobs VALUES ('new', 'queued', '')")
             action = mock.Mock()
+            self.assertFalse(UPGRADE.when_quiescent(database, "upgrade", action))
+            action.assert_not_called()
+            with sqlite3.connect(database) as connection:
+                connection.execute("UPDATE jobs SET state='completed' WHERE id='new'")
             self.assertFalse(UPGRADE.when_quiescent(database, "upgrade", action))
             action.assert_not_called()
 

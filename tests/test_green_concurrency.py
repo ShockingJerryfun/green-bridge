@@ -163,6 +163,35 @@ class GreenConcurrencyTests(unittest.TestCase):
             time.sleep(.05)
         self.fail("grouped results did not arrive")
 
+    def test_service_logs_task_descriptions_without_sync_chatter(self) -> None:
+        task = "log-test"
+        requests = [
+            {"version": 1, "id": "described", "action": "command.execute",
+             "description": "检查运行状态\n读取进程信息", "command": self.command("print('FIRST')")},
+            {"version": 1, "id": "legacy", "action": "command.execute",
+             "command": self.command("print('SECOND')")},
+        ]
+        path = self.root / "log-batch.json"
+        path.write_text(json.dumps({"commands": requests}, ensure_ascii=False), encoding="utf-8")
+        self.process = subprocess.Popen([sys.executable, str(BRIDGE), "--config", str(self.config), "serve"],
+                                        stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+        self.call("submit-batch", str(path), "--task", task, "--fast")
+        self.assertEqual(self.wait_group_result(task, "described")["state"], "completed")
+        self.assertEqual(self.wait_group_result(task, "legacy")["state"], "completed")
+        time.sleep(2.5)  # Allow multiple idle synchronizations after both commands finish.
+        log = (self.state / "service.log").read_text(encoding="utf-8")
+        self.assertIn("执行命令：检查运行状态 读取进程信息 [任务 log-test / 指令 described]", log)
+        self.assertIn("执行命令：未填写中文说明 [任务 log-test / 指令 legacy]", log)
+        self.assertNotIn("Git branch synchronization took", log)
+        self.assertNotIn("FIRST", log)
+        self.assertNotIn("SECOND", log)
+        self.process.terminate()
+        _, stderr = self.process.communicate(timeout=10)
+        console = stderr.decode("utf-8")
+        self.assertIn("检查运行状态 读取进程信息", console)
+        self.assertIn("未填写中文说明", console)
+        self.assertNotIn("Git branch synchronization took", console)
+
     def test_small_grouped_results_publish_together(self) -> None:
         before = git("--git-dir", str(self.remote), "rev-parse", "refs/heads/pingpong/results")
         self.start_service()
@@ -492,6 +521,14 @@ for line in sys.stdin:
         self.assertEqual(delivery[0], "remote_rejected")
         self.assertGreaterEqual(delivery[1], 1)
         self.assertGreater(delivery[2], time.time())
+        deadline = time.monotonic() + 15
+        while delivery[1] < 2 and time.monotonic() < deadline:
+            time.sleep(0.1)
+            with sqlite3.connect(str(self.state / "state.sqlite3")) as connection:
+                delivery = connection.execute("SELECT last_error, failures, next_retry_at FROM delivery_attempts "
+                                              "WHERE job_id='retry'").fetchone()
+        self.assertGreaterEqual(delivery[1], 2)
+        self.assertEqual(log.read_text(encoding="utf-8").count("Result publication retry failed"), 1)
         hook.unlink()
         self.assertEqual(self.wait_result("retry")["state"], "completed")
         self.assertEqual(marker.read_bytes(), b"X")
