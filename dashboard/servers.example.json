@@ -1,0 +1,9 @@
+{
+  "servers": [
+    {"label": "target-1", "user": "root", "host": "target-1.example.com"},
+    {"label": "target-2", "user": "root", "host": "target-2.example.com"}
+  ],
+  "ssh_options": ["-T", "-n", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes", "-o", "ConnectTimeout=8"],
+  "cwd": "C:\\",
+  "default_timeout_seconds": 180
+}
