@@ -33,6 +33,8 @@ metadata:
 - **初始化**：读取 [初始化流程](references/workflows.md#初始化)，运行 `bash <skill-dir>/scripts/init_blue.sh <repo> [branch]`。完成标准是目标文件已生成且原内容保留；提交/推送仅在请求包含发布接入配置时完成。
 - **派单**：读取 [派单流程](references/workflows.md#派单) 和 [任务书模板](assets/taskbrief.template.md)，完成本轮交接并报告远端已确认的提交。蓝区持续监控按用户请求设置。
 - **收件/判读**：运行 `bash <skill-dir>/scripts/check_inbox.sh <repo>`，只在出现新提交时读取 [收件与判读](references/workflows.md#收件与判读)。仅请求检查时不合并、不回写。
+- **监控台**：运行 `bash <skill-dir>/dashboard/start.sh`。任务视图 `http://127.0.0.1:8899/`，对话视图 `http://127.0.0.1:8899/chat`（命令气泡 + 底部输入框 + 环境选择器）。SSH/base64 包装会解码成"实际远程命令"。构造器与对话页支持"保持目录"模式：`cd` 后下一条仍在原目录（只保持 cwd，不保持环境变量，不支持 vim 等交互程序）。用法见 [监控台说明](dashboard/README.md)。
+- **派单上下文**：可在请求的 `context` 中附带最近对话与补充说明，直接读取本机会话日志，不调用模型；运行 `python3 <skill-dir>/dashboard/context.py --note "<说明>"` 生成。context 会写入传输仓库，不要放凭据。
 - **推送前检查**：按实际变更运行 `bash <skill-dir>/scripts/prepush_gate.sh <repo> [changed-file ...]`。无文件参数时仅查 Git 差异/状态；显式文件列表才做对应语法检查。项目验收按任务书执行。
 - **绿区自动服务**：读取 [自动交接协议和部署说明](references/green_service.md)。默认由蓝区规划并用 `command.execute` 在绿区直接运行命令或脚本，按字节取回 stdout、stderr 和退出码；仅在用户明确要求时用 `task.execute` 调用 CodeAgent。直接命令不进入 CodeAgent 原生会话历史；可附带会话别名供 Git 记录关联。服务中断或执行超时标为未知，不自动重跑已启动的任务。
 
